@@ -5,22 +5,20 @@ import re
 import smtplib
 from datetime import datetime
 from email.mime.text import MIMEText
-
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
 from aiogram.dispatcher.filters.state import State, StatesGroup
-
 from dotenv import load_dotenv
-load_dotenv()
-
 import os
+
+load_dotenv()
 
 API_TOKEN = os.getenv('API_TOKEN')
 PAYMENT_PROVIDER_TOKEN = os.getenv('PAYMENT_PROVIDER_TOKEN')
 EMAIL_SENDER = os.getenv('EMAIL_SENDER')
 EMAIL_PASSWORD = os.getenv('EMAIL_PASSWORD')
-ADMINS = [1371340477, 812859554]  # ← твой Telegram ID
+ADMINS = [1371340477, 812859554]  # ← Укажи свои Telegram ID
 
 logging.basicConfig(level=logging.INFO)
 
@@ -30,6 +28,7 @@ dp = Dispatcher(bot, storage=MemoryStorage())
 
 class Order(StatesGroup):
     waiting_for_email = State()
+    confirming_email = State()
     waiting_for_payment = State()
 
 
@@ -84,14 +83,38 @@ async def enter_email(message: types.Message, state: FSMContext):
         await message.reply("❌ Неверный email. Повторите ввод:")
         return
 
+    await state.update_data(email=email)
+
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(types.InlineKeyboardButton(text="✅ Подтвердить email", callback_data="confirm_email"))
+    keyboard.add(types.InlineKeyboardButton(text="✏ Изменить email", callback_data="edit_email"))
+
+    await message.answer(
+        f"Вы ввели: **{email}**\nПроверьте и подтвердите.",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+    await Order.confirming_email.set()
+
+
+@dp.callback_query_handler(lambda c: c.data == "edit_email", state=Order.confirming_email)
+async def edit_email(callback_query: types.CallbackQuery, state: FSMContext):
+    await callback_query.message.edit_text("Введите новый email:")
+    await Order.waiting_for_email.set()
+    await callback_query.answer()
+
+
+@dp.callback_query_handler(lambda c: c.data == "confirm_email", state=Order.confirming_email)
+async def confirm_email(callback_query: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     product = data['product']
+    email = data['email']
     order_id = generate_order_id()
 
-    await state.update_data(email=email, order_id=order_id)
+    await state.update_data(order_id=order_id)
 
     await bot.send_invoice(
-        chat_id=message.chat.id,
+        chat_id=callback_query.from_user.id,
         title=product["name"],
         description=product["description"],
         payload=str(order_id),
@@ -101,6 +124,7 @@ async def enter_email(message: types.Message, state: FSMContext):
     )
 
     await Order.waiting_for_payment.set()
+    await callback_query.answer()
 
 
 @dp.pre_checkout_query_handler(lambda query: True)
@@ -126,7 +150,6 @@ async def process_payment(message: types.Message, state: FSMContext):
 
     save_order(order)
 
-    # Отправка чека на почту
     try:
         msg = MIMEText(
             f"Спасибо за покупку!\n\n"
@@ -145,7 +168,7 @@ async def process_payment(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Ошибка при отправке email: {e}")
 
-    await message.answer(f"✅ Оплата прошла успешно!\nНомер заказа: {order_id}")
+    await message.answer(f"✅ Оплата прошла успешно!\nСпасибо за покупку!\nВаш номер заказа: {order_id}")
     await state.finish()
 
 
